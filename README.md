@@ -78,7 +78,4 @@ Model training and large-scale experiments are not included in this repository.
 
 ---
 
-## Citation
-
-If you find this code useful, please consider citing our paper.
 
