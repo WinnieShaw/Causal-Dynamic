@@ -1,8 +1,7 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-from cci_computation import compute_cci
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from cci_computation import compute_cci
 
 
 def make_prompt(question):
@@ -15,9 +14,37 @@ def make_prompt(question):
     )
 
 
-def generate_answer(model, tokenizer, question, max_new_tokens=128):
+def get_input_device(model):
+    """Return the device where input tensors should be placed."""
+    return next(model.parameters()).device
+
+
+def tokenize_prompt(tokenizer, question, device):
+    """Tokenize a formatted prompt and return a 1D tensor of token ids."""
     prompt = make_prompt(question)
-    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+    return tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )["input_ids"][0].to(device)
+
+
+def generate_answer(model, tokenizer, question, max_new_tokens=128):
+    """
+    Generate an answer and return both the decoded text and the generated token ids
+    excluding the prompt tokens.
+    """
+    input_device = get_input_device(model)
+    prompt = make_prompt(question)
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+    inputs = {k: v.to(input_device) for k, v in inputs.items()}
+
+    prompt_len = inputs["input_ids"].size(1)
 
     gen_cfg = GenerationConfig(
         max_new_tokens=max_new_tokens,
@@ -29,9 +56,12 @@ def generate_answer(model, tokenizer, question, max_new_tokens=128):
     )
 
     with torch.no_grad():
-        out = model.generate(**inputs, generation_config=gen_cfg)
+        outputs = model.generate(**inputs, generation_config=gen_cfg)
 
-    return tokenizer.decode(out[0], skip_special_tokens=True)
+    generated_ids = outputs[0, prompt_len:]
+    answer_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+    return answer_text, generated_ids
 
 
 if __name__ == "__main__":
@@ -47,30 +77,40 @@ if __name__ == "__main__":
         device_map="auto",
         trust_remote_code=True,
     )
+    model.eval()
+
+    input_device = get_input_device(model)
 
     questions = [
         "If human sleep requirements were reduced to just two hours per day, how might this change patterns of productivity, social interaction, and long-term health?",
-        "If Earth’s gravity were suddenly reduced by half, what effects might this have on human physiology, architectural design, and daily activities?"
+        "If Earth’s gravity were suddenly reduced by half, what effects might this have on human physiology, architectural design, and daily activities?",
     ]
 
-    prompt_id_map = {
-        q: tokenizer(make_prompt(q), return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(device)
+    prompt_items = [
+        {
+            "question": q,
+            "ctx": tokenize_prompt(tokenizer, q, input_device),
+        }
         for q in questions
-    }
+    ]
 
-    q = questions[0]
-    answer = generate_answer(model, tokenizer, q)
-    gen_ids = tokenizer(answer, return_tensors="pt", add_special_tokens=False)["input_ids"].to(device)[0]
+    target_question = questions[0]
+    answer_text, generated_ids = generate_answer(model, tokenizer, target_question)
 
-    for t in range(1, len(gen_ids)):
-        prefix_ids = gen_ids[:t].unsqueeze(0)
-        token_id = gen_ids[t].item()
+    print("Generated answer:")
+    print(answer_text)
+    print()
+
+    for t in range(1, generated_ids.size(0)):
+        prefix_ids = generated_ids[:t].unsqueeze(0)
+        token_id = generated_ids[t].item()
 
         cci = compute_cci(
             model=model,
             token_id=token_id,
             prefix_ids=prefix_ids,
-            prompt_id_map=prompt_id_map,
+            prompt_items=prompt_items,
+            mode="sample_uniform",
         )
 
         print(f"t={t:03d}  CCI={cci:+.4f}")
